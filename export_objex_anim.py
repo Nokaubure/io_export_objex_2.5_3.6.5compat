@@ -297,14 +297,14 @@ def write_action(fw, scene, global_matrix, object_transform, armature, root_bone
             if eyes_bone is not None:
                 i = round(eyes_bone.head.x) # Want it in armature space, not transform space
                 if i < -1 or i > 7:
-                    log.warning('Link eye index (Eyes bone X value) out of range -1 to 7')
+                    log.warning('Link eye index (Eyes bone X value) out of range -1 to 7, was {}', eyes_bone.head.x)
                     if i < -1 or i > 14:
                         i = -1
                 texanimvalue |= i+1
             if mouth_bone is not None:
                 i = round(mouth_bone.head.x)
                 if i < -1 or i > 3:
-                    log.warning('Link mouth index (Mouth bone X value) out of range -1 to 3')
+                    log.warning('Link mouth index (Mouth bone X value) out of range -1 to 3, was {}', eyes_bone.head.x)
                     if i < -1 or i > 14:
                         i = -1
                 texanimvalue |= (i+1) << 4

@@ -23,26 +23,25 @@ from .logging_util import getLogger
 from . import template
 
 def hexify(segment: str):
-    if len(segment) == 0:
+    if not segment:
         return ""
 
-    if segment.startswith("0x"):
-        if segment.startswith("0x0"):
-            if segment.endswith("000000"):
-                return segment
-            segment = segment + "000000"
-        else:
-            if not segment.endswith("000000"):
-                segment = segment + "000000"
-            segment = segment[:2] + "0" + segment[2:]
-    else:
-        if len(segment) > 1:
+    if not segment.startswith("0x"):
+        if len(segment) != 1 or segment.upper() not in "0123456789ABCDEF":
             return ""
-        segment = "0x0" + segment + "000000"
-    
-    slist = list(segment.upper())
-    slist[1] = 'x'
-    return ''.join(slist)
+        return "0x0" + segment.upper() + "000000"
+
+    hex_part = segment[2:].upper()
+
+    # If it already starts with 0x0, just pad to 8 digits
+    if segment.startswith("0x0"):
+        hex_part = hex_part.ljust(8, '0')
+        return "0x" + hex_part
+
+    # If it starts with 0x but not 0x0, insert the extra 0 and then pad
+    hex_part = "0" + hex_part
+    hex_part = hex_part.ljust(8, '0')
+    return "0x" + hex_part
 
 # scene
 class SavedPoseBone(bpy.types.PropertyGroup):
@@ -109,6 +108,7 @@ class ObjexSceneProperties(bpy.types.PropertyGroup):
     menu_joint = bpy.props.BoolProperty(name='Joint Sphere')
     menu_mesh = bpy.props.BoolProperty(name='Mesh')
     menu_global = bpy.props.BoolProperty(name='Export Settings')
+    menu_folding = bpy.props.BoolProperty(name='Folding')
     mode_menu = bpy.props.EnumProperty(
         items=[
             ('menu_mode_combiner',    'Combiner', '(A-B)*C+D',                'SHADING_RENDERED', 0),

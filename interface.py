@@ -546,6 +546,11 @@ class OBJECT_PT_panel3d(bpy.types.Panel):
         if foldable_menu(box, context.scene.objex_bonus, "menu_global"):
             box.prop(context.scene.objex_bonus, 'blend_scale')
 
+        box = self.layout.box()
+        if foldable_menu(box, context.scene.objex_bonus, "menu_folding"):
+            if armature:
+                menu_draw_folding(box, armature, context)
+
 # material
 
 def stripPrefix(s, prefix):
@@ -1561,8 +1566,9 @@ class OBJEX_OT_material_build_nodes(bpy.types.Operator):
                 mat.node_tree.nodes["OBJEX_TransformUV1"].inputs[1].default_value = -mat.f3d_mat.tex1.S.shift
                 mat.node_tree.nodes["OBJEX_TransformUV1"].inputs[2].default_value = -mat.f3d_mat.tex1.T.shift
                 mat.node_tree.nodes["OBJEX_EnvColor"].inputs[1].default_value = mat.f3d_mat.env_color[3]
-                name = mat.node_tree.nodes["OBJEX_Texel1Texture"].image.name
-                bpy.data.images[name].objex_bonus.format = mat.f3d_mat.tex1.tex_format;
+                if mat.node_tree.nodes["OBJEX_Texel1Texture"].image:
+                    name = mat.node_tree.nodes["OBJEX_Texel1Texture"].image.name
+                    bpy.data.images[name].objex_bonus.format = mat.f3d_mat.tex1.tex_format
 
             mat.node_tree.nodes["OBJEX_PrimColor"].inputs[0].default_value = (mat.f3d_mat.prim_color[0],mat.f3d_mat.prim_color[1],mat.f3d_mat.prim_color[2],mat.f3d_mat.prim_color[3])
             mat.node_tree.nodes["OBJEX_PrimColor"].inputs[1].default_value = mat.f3d_mat.prim_color[3]
@@ -2158,6 +2164,8 @@ class OBJEX_PT_material(bpy.types.Panel):
                 sub_box.row().prop(data, "vertex_shading", expand=True)
                 sub_box.prop(data, "external_material_segment")
 
+
+
 class OBJEX_OT_set_pixels_along_uv_from_image_dimensions(bpy.types.Operator):
 
     bl_idname = "objex.set_pixels_along_uv_from_image_dimensions"
@@ -2189,6 +2197,26 @@ class OBJEX_OT_set_pixels_along_uv_from_image_dimensions(bpy.types.Operator):
                 node.inputs["Pixels along U"].default_value = image.size[0] * 2
                 node.inputs["Pixels along V"].default_value = image.size[1] * 2
         return {"FINISHED"}
+
+
+def menu_draw_folding(layout:bpy.types.UILayout, armature:bpy.types.Armature, context:bpy.types.Context):
+    box = layout
+    box.use_property_split = False
+    scene = context.scene
+    objex_scene = context.scene.objex_bonus
+    row = box.row()
+    row.alignment = 'CENTER'
+    row = box.row()
+    row.operator('objex.autofold_save_pose', text='Save pose')
+    row.operator('objex.autofold_restore_pose', text='Restore pose')
+    row = box.row()
+    row.operator('objex.autofold_fold_unfold', text='Fold').action = 'FOLD'
+    row.operator('objex.autofold_fold_unfold', text='Unfold').action = 'UNFOLD'
+    row.operator('objex.autofold_fold_unfold', text='Switch').action = 'SWITCH'
+    box.label(text='Default saved pose to use for folding:')
+    box.template_list('UI_UL_list', 'OBJEX_SavedPose', scene.objex_bonus, 'saved_poses', armature.data.objex_bonus, 'fold_unfold_saved_pose_index', rows=2)
+    box.operator('objex.autofold_delete_pose', text='Delete pose')
+
 
 classes = (
     OBJEX_UL_actions,
