@@ -106,7 +106,7 @@ COMBINER_FLAGS_SUPPORT = {
 }
 
 # matches default_value type of OBJEX_NodeSocket_CombinerInput
-color0 = (0,0,0)
+color0 = (0,0,0,1)
 
 node_setup = {
     'Geometry': {

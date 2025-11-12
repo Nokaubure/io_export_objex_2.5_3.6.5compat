@@ -183,4 +183,4 @@ def combiner_apply_template(template:str, material:bpy.types.Material):
     for input_flag, (node_target, alpha, value) in COMBINER_TEMPLATES[template].items():
         node = node_tree.nodes[node_target]
 
-        setattr(node.inputs[alpha], input_flag, value)
+        setattr(node, input_flag, value)

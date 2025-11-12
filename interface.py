@@ -283,7 +283,9 @@ class OBJEX_OT_MassInit(bpy.types.Operator):
                         obj.data.attributes.remove(obj.data.attributes['Alpha'])
                 if "_collision" in obj.name:
                     obj.data.objex_bonus.type = "COLLISION"
-                    obj.name = 'collision.' + obj.name
+                    obj.name = 'collision.' + obj.name.replace('_collision','')
+                if "_mesh" in obj.name:
+                    obj.name = obj.name.replace('_mesh','')
                 if obj.type == 'ARMATURE':
                     arm = obj.data
                     for bone in arm.bones:
@@ -742,58 +744,75 @@ class OBJEX_NodeSocket_CombinerInput(bpy.types.NodeSocketColor):
             and flag in CST.COMBINER_FLAGS_SUPPORT[cycle][name]
         ) else CST.COLOR_BAD
 
-def input_flag_list_choose_get(cycle, variable, cycle_id):
-        def input_flag_list_choose(self, context):
-            log = getLogger("interface")
-            input_flags_prop_name = "input_flags_%s_%s_%d" % (cycle, variable, cycle_id)
-            flag = getattr(self, input_flags_prop_name)
-            if flag == "_":
-                return
-            tree = self.id_data
-            matching_socket = None
-            for n in tree.nodes:
-                for s in n.outputs:
-                    if s.bl_idname == combinerOutputClassName:
-                        if OBJEX_NodeSocket_CombinerOutput is not None: # < 2.80
-                            socket_flag = s.flagColorCycle if cycle == CST.CYCLE_COLOR else s.flagAlphaCycle
-                        else: # 2.80+
-                            key = "%s %s" % (
-                                    "flagColorCycle" if cycle == CST.CYCLE_COLOR else "flagAlphaCycle",
-                                    s.identifier)
-                            socket_flag = n[key] if key in n else None
-                        if flag == socket_flag:
-                            if matching_socket:
-                                log.error("Found several sockets for flag {}: {!r} {!r}", flag, matching_socket, s)
-                            matching_socket = s
-            if not matching_socket:
-                log.error("Did not find any socket for flag {}", flag)
-                return
-            while self.links:
-                tree.links.remove(self.links[0])
-            tree.links.new(matching_socket, self)
-            #Noka: desperate attempt to fix the color bug
-            tree.links.new(matching_socket, self.node.inputs.get(self.name + "2"))
-        
-        return input_flag_list_choose
+def input_flag_list_choose_node_get(cycle, variable, cycle_id, input_name):
+    # returns a callback to assign links when the enum changes
+    def input_flag_list_choose(self, context):
+        # self is a Node now
+        log = getLogger("interface")
+        flag_prop_name = "input_flags_%s_%s_%d" % (cycle, variable, cycle_id)
+        flag = getattr(self, flag_prop_name, "_")
+        if flag == "_":
+            return
+        tree = self.id_data if hasattr(self, "id_data") else None
+        if tree is None:
+            log.error("Node has no id_data")
+            return
+        matching_socket = None
+        # find an output socket matching the flag
+        for n in tree.nodes:
+            for s in n.outputs:
+                # only consider combiner-style outputs (they have node["flagColorCycle <id>"] keys)
+                key = "%s %s" % (
+                    "flagColorCycle" if cycle == CST.CYCLE_COLOR else "flagAlphaCycle",
+                    s.identifier)
+                socket_flag = n.get(key, None)
+                if socket_flag == flag:
+                    if matching_socket:
+                        log.error("Found several sockets for flag {}: {!r} {!r}", flag, matching_socket, s)
+                    matching_socket = s
+        if not matching_socket:
+            log.error("Did not find any socket for flag {}", flag)
+            return
+        # remove existing links from the node's specified input, then link matching_socket -> target input
+        target_input = self.inputs.get(input_name)
+        if not target_input:
+            log.error("Node {} has no input {}", self.name, input_name)
+            return
+        # remove existing links
+        while target_input.links:
+            tree.links.remove(target_input.links[0])
+        tree.links.new(matching_socket, target_input)
+        # attempt to also connect to any X2 (A2) variant if present (mirrors original behavior)
+        other_input = self.inputs.get(input_name + "2")
+        if other_input:
+            while other_input.links:
+                tree.links.remove(other_input.links[0])
+            tree.links.new(matching_socket, other_input)
+    return input_flag_list_choose
 
+# create the EnumProperties on bpy.types.Node
 for cycle in (CST.CYCLE_COLOR, CST.CYCLE_ALPHA):
     for cycle_id in (0, 1):
         for variable in ("A","B","C","D"):
+            prop_name = "input_flags_%s_%s_%d" % (cycle, variable, cycle_id)
+            # choose input name used inside node groups (A,B,C,D)
+            input_name = variable
+            items = sorted(
+                (flag, stripPrefix(flag, CST.COMBINER_FLAGS_PREFIX[cycle]), flag)
+                    for flag in CST.COMBINER_FLAGS_SUPPORT[cycle][variable]
+                    if cycle_id != 0 or flag not in ("G_CCMUX_COMBINED","G_CCMUX_COMBINED_ALPHA","G_ACMUX_COMBINED")
+            ) + [("_","...","")]
+            # bind EnumProperty to Node class
             setattr(
-                OBJEX_NodeSocket_CombinerInput,
-                "input_flags_%s_%s_%d" % (cycle, variable, cycle_id),
+                bpy.types.Node,
+                prop_name,
                 bpy.props.EnumProperty(
-                    items=sorted(
-                        (flag, stripPrefix(flag, CST.COMBINER_FLAGS_PREFIX[cycle]), flag)
-                            for flag in CST.COMBINER_FLAGS_SUPPORT[cycle][variable]
-                            if cycle_id != 0 or flag not in ("G_CCMUX_COMBINED","G_CCMUX_COMBINED_ALPHA","G_ACMUX_COMBINED")
-                    ) + [("_","...","")],
+                    items=items,
                     name="%s" % variable,
                     default="_",
-                    update=input_flag_list_choose_get(cycle, variable, cycle_id)
+                    update=input_flag_list_choose_node_get(cycle, variable, cycle_id, input_name)
                 )
             )
-del input_flag_list_choose_get
 
 combinerInputClassName = "OBJEX_NodeSocket_CombinerInput"
 
@@ -1351,6 +1370,17 @@ class OBJEX_OT_material_build_nodes(bpy.types.Operator):
                 socket = node.inputs[input_socket_key]
                 for k, v in socket_attributes.items():
                     try:
+                        # Handle Blender 3.6 stricter type system
+                        if k == "default_value":
+                            # Detect if socket expects float vs color tuple
+                            if hasattr(socket, "type") and socket.type == 'VALUE' and isinstance(v, (tuple, list)):
+                                if len(v) > 0:
+                                    v = float(v[0])  # only take first component
+                            elif hasattr(socket, "type") and socket.type == 'VECTOR' and isinstance(v, (tuple, list)):
+                                v = tuple(v[:3])  # ensure exactly 3 components
+                            elif hasattr(socket, "type") and socket.type == 'RGBA' and isinstance(v, (tuple, list)):
+                                if len(v) == 3:
+                                    v = tuple(v) + (1.0,)
                         setattr(socket, k, v)
                     except ValueError:
                         log.warn("{} setattr({!r}, {!r}, {!r}) ValueError "
@@ -1575,9 +1605,9 @@ class OBJEX_OT_material_build_nodes(bpy.types.Operator):
                 if input.links:
                     otherSocket = input.links[0].from_socket
                     key = "%s %s" % ("flagColorCycle" if cycle == CST.CYCLE_COLOR else "flagAlphaCycle", otherSocket.identifier)
-                    setattr(input, input_flags_prop_name, otherSocket.node[key])
+                    input[input_flags_prop_name] = otherSocket.node[key]
                 else:
-                    setattr(input, input_flags_prop_name, def_value)
+                    input[input_flags_prop_name] = def_value
 
         if material.node_tree.nodes["OBJEX_Shade"].inputs["Color"].links[0].from_socket.node.name == "Vertex Color":
             setattr(material.objex_bonus, "shading", "VERTEX_COLOR")
@@ -1637,7 +1667,9 @@ class OBJEX_OT_material_build_nodes(bpy.types.Operator):
                     mat.node_tree.nodes["OBJEX_TransformUV0"].inputs[2].default_value = -mat.f3d_mat.tex0.T.shift
                     name = mat.node_tree.nodes["OBJEX_Texel0Texture"].image.name
                     bpy.data.images[name].objex_bonus.format = mat.f3d_mat.tex0.tex_format;
-                    
+                else:
+                    mat.node_tree.nodes["OBJEX_Texel0Texture"].image = None
+
                 if uses_tex1 and mat.f3d_mat.tex1.tex_set:
                     mat.node_tree.nodes["OBJEX_Texel1Texture"].image = mat.f3d_mat.tex1.tex
                     mat.node_tree.nodes["OBJEX_Texel1Texture"].interpolation = "Linear"
@@ -1648,6 +1680,8 @@ class OBJEX_OT_material_build_nodes(bpy.types.Operator):
                     if mat.node_tree.nodes["OBJEX_Texel1Texture"].image:
                         name = mat.node_tree.nodes["OBJEX_Texel1Texture"].image.name
                         bpy.data.images[name].objex_bonus.format = mat.f3d_mat.tex1.tex_format
+                else:
+                    mat.node_tree.nodes["OBJEX_Texel1Texture"].image = None
 
                 mat.node_tree.nodes["OBJEX_PrimColor"].inputs[0].default_value = (mat.f3d_mat.prim_color[0],mat.f3d_mat.prim_color[1],mat.f3d_mat.prim_color[2],mat.f3d_mat.prim_color[3])
                 mat.node_tree.nodes["OBJEX_PrimColor"].inputs[1].default_value = mat.f3d_mat.prim_color[3]
@@ -1728,23 +1762,23 @@ class OBJEX_OT_material_build_nodes(bpy.types.Operator):
                 mat.objex_bonus.texture_u_1 = 'MIRROR' if mat.f3d_mat.tex1.S.mirror else ('CLAMP' if mat.f3d_mat.tex1.S.clamp else 'WRAP')
                 mat.objex_bonus.texture_v_1 = 'MIRROR' if mat.f3d_mat.tex1.T.mirror else ('CLAMP' if mat.f3d_mat.tex1.T.clamp else 'WRAP')
 
-                mat.node_tree.nodes["OBJEX_ColorCycle0"].inputs[0].input_flags_C_A_0 = "G_CCMUX_" + mat.f3d_mat.combiner1.A
-                mat.node_tree.nodes["OBJEX_ColorCycle0"].inputs[1].input_flags_C_B_0 = "G_CCMUX_" + mat.f3d_mat.combiner1.B
-                mat.node_tree.nodes["OBJEX_ColorCycle0"].inputs[2].input_flags_C_C_0 = "G_CCMUX_" + mat.f3d_mat.combiner1.C
-                mat.node_tree.nodes["OBJEX_ColorCycle0"].inputs[3].input_flags_C_D_0 = "G_CCMUX_" + mat.f3d_mat.combiner1.D
-                mat.node_tree.nodes["OBJEX_ColorCycle1"].inputs[0].input_flags_C_A_1 = "G_CCMUX_" + mat.f3d_mat.combiner2.A
-                mat.node_tree.nodes["OBJEX_ColorCycle1"].inputs[1].input_flags_C_B_1 = "G_CCMUX_" + mat.f3d_mat.combiner2.B
-                mat.node_tree.nodes["OBJEX_ColorCycle1"].inputs[2].input_flags_C_C_1 = "G_CCMUX_" + mat.f3d_mat.combiner2.C
-                mat.node_tree.nodes["OBJEX_ColorCycle1"].inputs[3].input_flags_C_D_1 = "G_CCMUX_" + mat.f3d_mat.combiner2.D
+                mat.node_tree.nodes["OBJEX_ColorCycle0"].input_flags_C_A_0 = "G_CCMUX_" + mat.f3d_mat.combiner1.A
+                mat.node_tree.nodes["OBJEX_ColorCycle0"].input_flags_C_B_0 = "G_CCMUX_" + mat.f3d_mat.combiner1.B
+                mat.node_tree.nodes["OBJEX_ColorCycle0"].input_flags_C_C_0 = "G_CCMUX_" + mat.f3d_mat.combiner1.C
+                mat.node_tree.nodes["OBJEX_ColorCycle0"].input_flags_C_D_0 = "G_CCMUX_" + mat.f3d_mat.combiner1.D
+                mat.node_tree.nodes["OBJEX_ColorCycle1"].input_flags_C_A_1 = "G_CCMUX_" + mat.f3d_mat.combiner2.A
+                mat.node_tree.nodes["OBJEX_ColorCycle1"].input_flags_C_B_1 = "G_CCMUX_" + mat.f3d_mat.combiner2.B
+                mat.node_tree.nodes["OBJEX_ColorCycle1"].input_flags_C_C_1 = "G_CCMUX_" + mat.f3d_mat.combiner2.C
+                mat.node_tree.nodes["OBJEX_ColorCycle1"].input_flags_C_D_1 = "G_CCMUX_" + mat.f3d_mat.combiner2.D
 
-                mat.node_tree.nodes["OBJEX_AlphaCycle0"].inputs[0].input_flags_A_A_0 = "G_ACMUX_" + mat.f3d_mat.combiner1.A_alpha
-                mat.node_tree.nodes["OBJEX_AlphaCycle0"].inputs[1].input_flags_A_B_0 = "G_ACMUX_" + mat.f3d_mat.combiner1.B_alpha
-                mat.node_tree.nodes["OBJEX_AlphaCycle0"].inputs[2].input_flags_A_C_0 = "G_ACMUX_" + mat.f3d_mat.combiner1.C_alpha
-                mat.node_tree.nodes["OBJEX_AlphaCycle0"].inputs[3].input_flags_A_D_0 = "G_ACMUX_" + mat.f3d_mat.combiner1.D_alpha
-                mat.node_tree.nodes["OBJEX_AlphaCycle1"].inputs[0].input_flags_A_A_1 = "G_ACMUX_" + mat.f3d_mat.combiner2.A_alpha
-                mat.node_tree.nodes["OBJEX_AlphaCycle1"].inputs[1].input_flags_A_B_1 = "G_ACMUX_" + mat.f3d_mat.combiner2.B_alpha
-                mat.node_tree.nodes["OBJEX_AlphaCycle1"].inputs[2].input_flags_A_C_1 = "G_ACMUX_" + mat.f3d_mat.combiner2.C_alpha
-                mat.node_tree.nodes["OBJEX_AlphaCycle1"].inputs[3].input_flags_A_D_1 = "G_ACMUX_" + mat.f3d_mat.combiner2.D_alpha
+                mat.node_tree.nodes["OBJEX_AlphaCycle0"].input_flags_A_A_0 = "G_ACMUX_" + mat.f3d_mat.combiner1.A_alpha
+                mat.node_tree.nodes["OBJEX_AlphaCycle0"].input_flags_A_B_0 = "G_ACMUX_" + mat.f3d_mat.combiner1.B_alpha
+                mat.node_tree.nodes["OBJEX_AlphaCycle0"].input_flags_A_C_0 = "G_ACMUX_" + mat.f3d_mat.combiner1.C_alpha
+                mat.node_tree.nodes["OBJEX_AlphaCycle0"].input_flags_A_D_0 = "G_ACMUX_" + mat.f3d_mat.combiner1.D_alpha
+                mat.node_tree.nodes["OBJEX_AlphaCycle1"].input_flags_A_A_1 = "G_ACMUX_" + mat.f3d_mat.combiner2.A_alpha
+                mat.node_tree.nodes["OBJEX_AlphaCycle1"].input_flags_A_B_1 = "G_ACMUX_" + mat.f3d_mat.combiner2.B_alpha
+                mat.node_tree.nodes["OBJEX_AlphaCycle1"].input_flags_A_C_1 = "G_ACMUX_" + mat.f3d_mat.combiner2.C_alpha
+                mat.node_tree.nodes["OBJEX_AlphaCycle1"].input_flags_A_D_1 = "G_ACMUX_" + mat.f3d_mat.combiner2.D_alpha
             
                 mat.is_f3d = False
                 del mat['f3d_mat']
@@ -2195,38 +2229,38 @@ class OBJEX_PT_material(bpy.types.Panel):
                 ac1 = material.node_tree.nodes["OBJEX_AlphaCycle1"]
 
                 row = sub_box.row()
-                row.prop(cc0.inputs[0], "input_flags_C_A_0", text="", icon="EVENT_A")
-                row.prop(cc1.inputs[0], "input_flags_C_A_1", text="", icon="EVENT_A")
+                row.prop(cc0, "input_flags_C_A_0", text="", icon="EVENT_A")
+                row.prop(cc1, "input_flags_C_A_1", text="", icon="EVENT_A")
                 
                 row = sub_box.row()
-                row.prop(cc0.inputs[1], "input_flags_C_B_0", text="", icon="EVENT_B")
-                row.prop(cc1.inputs[1], "input_flags_C_B_1", text="", icon="EVENT_B")
+                row.prop(cc0, "input_flags_C_B_0", text="", icon="EVENT_B")
+                row.prop(cc1, "input_flags_C_B_1", text="", icon="EVENT_B")
                 
                 row = sub_box.row()
-                row.prop(cc0.inputs[2], "input_flags_C_C_0", text="", icon="EVENT_C")
-                row.prop(cc1.inputs[2], "input_flags_C_C_1", text="", icon="EVENT_C")
+                row.prop(cc0, "input_flags_C_C_0", text="", icon="EVENT_C")
+                row.prop(cc1, "input_flags_C_C_1", text="", icon="EVENT_C")
                 
                 row = sub_box.row()
-                row.prop(cc0.inputs[3], "input_flags_C_D_0", text="", icon="EVENT_D")
-                row.prop(cc1.inputs[3], "input_flags_C_D_1", text="", icon="EVENT_D")
+                row.prop(cc0, "input_flags_C_D_0", text="", icon="EVENT_D")
+                row.prop(cc1, "input_flags_C_D_1", text="", icon="EVENT_D")
 
                 sub_box.label(text="Alpha")
 
                 row = sub_box.row()
-                row.prop(ac0.inputs[0], "input_flags_A_A_0", text="", icon="EVENT_A")
-                row.prop(ac1.inputs[0], "input_flags_A_A_1", text="", icon="EVENT_A")
+                row.prop(ac0, "input_flags_A_A_0", text="", icon="EVENT_A")
+                row.prop(ac1, "input_flags_A_A_1", text="", icon="EVENT_A")
                 
                 row = sub_box.row()
-                row.prop(ac0.inputs[1], "input_flags_A_B_0", text="", icon="EVENT_B")
-                row.prop(ac1.inputs[1], "input_flags_A_B_1", text="", icon="EVENT_B")
+                row.prop(ac0, "input_flags_A_B_0", text="", icon="EVENT_B")
+                row.prop(ac1, "input_flags_A_B_1", text="", icon="EVENT_B")
                 
                 row = sub_box.row()
-                row.prop(ac0.inputs[2], "input_flags_A_C_0", text="", icon="EVENT_C")
-                row.prop(ac1.inputs[2], "input_flags_A_C_1", text="", icon="EVENT_C")
+                row.prop(ac0, "input_flags_A_C_0", text="", icon="EVENT_C")
+                row.prop(ac1, "input_flags_A_C_1", text="", icon="EVENT_C")
                 
                 row = sub_box.row()
-                row.prop(ac0.inputs[3], "input_flags_A_D_0", text="", icon="EVENT_D")
-                row.prop(ac1.inputs[3], "input_flags_A_D_1", text="", icon="EVENT_D")
+                row.prop(ac0, "input_flags_A_D_0", text="", icon="EVENT_D")
+                row.prop(ac1, "input_flags_A_D_1", text="", icon="EVENT_D")
             
             elif mode_menu == "menu_mode_settings":
                 sub_box = box.box()
@@ -2427,6 +2461,7 @@ hex_sound_type = {
     "0x0D": "SOUND_DIRT_2",
     "0x0E": "SOUND_DIRT_3",
     "0x0F": "SOUND_DIRT_4",
+    "Custom": "SOUND_DIRT",
 }
 
 hex_floor_flags = {
@@ -2442,6 +2477,7 @@ hex_floor_flags = {
     "0x0A": "UNSET", #value not in objex
     "0x0B": "FLOOR_JUMP_DIVE",
     "0x0C": "FLOOR_VOID_ROOM",
+    "Custom": "UNSET",
 }
 
 hex_wall_flags = {
@@ -2460,6 +2496,7 @@ hex_wall_flags = {
     "0x0D": "UNSET", #value not in objex
     "0x0E": "UNSET", #value not in objex
     "0x0F": "UNSET", #value not in objex
+    "Custom": "UNSET",
 }
 
 hex_special_flags = {
@@ -2475,6 +2512,7 @@ hex_special_flags = {
     "0x0A": "SPECIAL_LOOKUP",
     "0x0B": "FLOOR_QUICKHORSE",
     "0x0C": "UNSET", #value not in objex
+    "Custom": "UNSET",
 }
 
 hex_conveyor_speed = {

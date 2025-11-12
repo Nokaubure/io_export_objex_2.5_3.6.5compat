@@ -534,7 +534,7 @@ def omp_change_shade(self, context):
 
     for input_flag, (node_target, alpha, value) in combiner[material.objex_bonus.shading].items():
         node = node_tree.nodes[node_target]
-        setattr(node.inputs[alpha], input_flag, value)
+        setattr(node, input_flag, value)
 
     if material.objex_bonus.shading == "LIGHTING":
         node_setup_helpers.set_shade_source_lighting(material)
